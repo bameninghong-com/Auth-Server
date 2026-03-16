@@ -1,0 +1,17 @@
+# Environment — contains passwords and JWT_SECRET
+.env
+.env.local
+.env.*.local
+
+# Node
+node_modules/
+dist/
+build/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db

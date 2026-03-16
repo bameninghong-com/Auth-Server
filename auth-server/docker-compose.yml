@@ -1,0 +1,153 @@
+services:
+
+  # ============================================================================
+  # VAULT — Secret Management
+  # Stores all JWT secrets, never touches disk unencrypted
+  # ============================================================================
+  vault:
+    image: hashicorp/vault:1.17
+    container_name: auth_vault
+    restart: unless-stopped
+
+    environment:
+      VAULT_ADDR:           "http://0.0.0.0:8200"
+      VAULT_API_ADDR:       "http://0.0.0.0:8200"
+      VAULT_CLUSTER_ADDR:   "http://0.0.0.0:8201"
+
+    cap_add:
+      - IPC_LOCK              # prevents secrets from being swapped to disk
+
+    volumes:
+      - vault_data:/vault/data
+      - vault_logs:/vault/logs
+      - ./vault/config:/vault/config:ro
+      - ./vault/init:/vault/init:ro
+
+    ports:
+      - "127.0.0.1:8200:8200"   # only localhost — never expose publicly
+
+    user: "100:1000"
+    command: vault server -config=/vault/config/vault.hcl
+
+    healthcheck:
+      # /v1/sys/health antwortet mit verschiedenen HTTP Codes je nach Status:
+      #   200 → initialized & unsealed (normal)
+      #   501 → not yet initialized    (erwartet beim ersten Start)
+      #   503 → sealed                 (erwartet nach Neustart)
+      # Alle davon bedeuten: HTTP API läuft. Nur ein Verbindungsfehler = unhealthy.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8200/v1/sys/health --server-response 2>&1 | grep -qE 'HTTP/[0-9.]+ [2345][0-9][0-9]'"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+
+    networks:
+      - auth_network
+
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+
+  # ============================================================================
+  # VAULT INIT — runs once to initialise & configure Vault
+  # Sets up KV store, policies, AppRole for the auth server
+  # ============================================================================
+  vault-init:
+    image: hashicorp/vault:1.17
+    container_name: auth_vault_init
+    restart: "no"             # runs once and exits
+
+    environment:
+      VAULT_ADDR:             "http://vault:8200"
+      VAULT_INIT_OUTPUT:      "/vault/init/credentials.json"
+
+    volumes:
+      - ./vault/init:/vault/init
+      - ./vault/policies:/vault/policies:ro
+
+    entrypoint: ["/bin/sh", "/vault/init/init.sh"]
+
+    depends_on:
+      vault:
+        condition: service_healthy
+
+    networks:
+      - auth_network
+
+
+  # ============================================================================
+  # POSTGRESQL
+  # ============================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: auth_postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB:       ${POSTGRES_DB:-auth_db}
+      POSTGRES_USER:     ${POSTGRES_USER:-auth_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init/sql:/docker-entrypoint-initdb.d:ro
+
+    ports:
+      - "127.0.0.1:5432:5432"
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-auth_user} -d ${POSTGRES_DB:-auth_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+    networks:
+      - auth_network
+
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+
+  # ============================================================================
+  # pgAdmin — only in dev profile
+  # docker compose --profile dev up
+  # ============================================================================
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: auth_pgadmin
+    restart: unless-stopped
+    profiles: ["dev"]
+
+    environment:
+      PGADMIN_DEFAULT_EMAIL:                  ${PGADMIN_EMAIL:-admin@localhost}
+      PGADMIN_DEFAULT_PASSWORD:               ${PGADMIN_PASSWORD:-admin}
+      PGADMIN_CONFIG_SERVER_MODE:             "False"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+
+    ports:
+      - "127.0.0.1:5050:80"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    networks:
+      - auth_network
+
+
+volumes:
+  postgres_data:
+    driver: local
+  vault_data:
+    driver: local
+  vault_logs:
+    driver: local
+
+networks:
+  auth_network:
+    driver: bridge
